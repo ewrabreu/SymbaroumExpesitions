@@ -1,0 +1,5 @@
+{
+  "name": "Symbaroum Assistant",
+  "description": "A virtual tabletop assistant for the Symbaroum RPG system, automating rolls and character attributes.",
+  "requestFramePermissions": []
+}
