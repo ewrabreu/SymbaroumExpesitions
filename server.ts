@@ -10,6 +10,7 @@ import { powers } from './src/data/powers';
 import { equipment } from './src/data/equipment';
 import { races } from './src/data/races';
 import { archetypes } from './src/data/archetypes';
+import { locations, Location } from './src/data/locations';
 
 const app = express();
 const PORT = 3000;
@@ -85,9 +86,222 @@ interface Character {
     xelins?: number;
     thaler?: number;
   };
+  inventory?: {
+    rations: number;
+    hasLicense: boolean;
+    licenseExpiry?: number; // Turnos restantes
+    hasMount: boolean;
+    starvationDays?: number; // Dias sem comer
+  };
   creationStep?: number;
+  currentLocation?: string; // ID da localização
+  activeTravel?: {
+    destinationId: string;
+    totalDistance: number;
+    distanceRemaining: number;
+    currentDay: number;
+    pace: 'normal' | 'forced' | 'death' | 'mounted';
+    isRiverTravel: boolean;
+    log: string;
+  };
+  activeExpedition?: {
+    locationId: string;
+    totalDays: number;
+    currentDay: number;
+    log: string;
+  };
+  chapter?: {
+    currentDay: number; // 1 a 365
+    theme: string;
+    conflict: string;
+    description: string;
+    tone: string;
+    history: string[];
+    nature: { resources: string; corruption: string };
+    culture: string;
+    npcs: { name: string; goal: string; resources: string; compromise: string; risk: string }[];
+    journal: string[];
+  };
 }
 const characters = new Map<string, Character>();
+
+const misfortunes = [
+  "Suprimentos estragados (Perda de 1d4 rações)",
+  "Perda de direção (Atraso de 1 dia)",
+  "Equipamento danificado",
+  "Fadiga extrema (-1 em todos os testes no próximo dia)",
+  "Ataque de insetos/parasitas"
+];
+
+const travelEvents = {
+  ruin: ["Ruína menor", "Santuário antigo", "Acampamento abandonado", "Monumento esquecido"],
+  encounter: ["Mercadores", "Batedores", "Refugiados", "Caçadores de tesouros"],
+  enemy: ["Bando de Goblins", "Elfos de Davokar", "Abominação faminta", "Salteadores"],
+  terrain: ["Pântano traiçoeiro", "Mata de espinhos", "Ravina íngreme", "Rio caudaloso"]
+};
+
+const primaryBlocks = [
+  { 
+    theme: "A Luta pela Sobrevivência", 
+    conflict: "Natureza vs. Civilização", 
+    description: "Grupos ou indivíduos têm visões diferentes sobre como a civilização deve se relacionar com a natureza.",
+    tone: "Cinza e Consequencial" 
+  },
+  { 
+    theme: "O Preço do Progresso", 
+    conflict: "Individualismo vs. Coletivismo", 
+    description: "Grupos ou indivíduos têm opiniões diferentes sobre o que deve ser priorizado: direitos individuais ou o bem coletivo.",
+    tone: "Sombrio e Perigoso" 
+  },
+  { 
+    theme: "O Medo do Desconhecido", 
+    conflict: "Abertura vs. Isolacionismo", 
+    description: "Grupos ou indivíduos têm opiniões diferentes sobre estrangeiros em geral, particularmente sobre sua capacidade de contribuir para a sociedade.",
+    tone: "Misterioso e Filosófico" 
+  }
+];
+
+const historyMarcos = [
+  "Civilização caída",
+  "Despertar de abominação",
+  "Mudança de poder",
+  "Descoberta de recurso raro"
+];
+
+const cultures = ["Yndaros (Ambria)", "Karvosti (Bárbaros)", "Symbar (Ruína/Escuridão)"];
+
+const oracleTable = [
+  { max: 1, text: "Sim, e..." },
+  { max: 9, text: "Sim" },
+  { max: 11, text: "Complicação" },
+  { max: 19, text: "Não" },
+  { max: 20, text: "Não, porque..." }
+];
+
+const creativePrompts = {
+  part1: ["Endereçando", "Assegurando", "Elogiando", "Enganando", "Exigindo", "Divagando", "Endossando", "Examinando"],
+  part2: ["Evitando", "Concluindo", "Confrontando", "Conectando", "Detalhando", "Discutindo", "Divulgando", "Aproveitando"],
+  part3: ["Crença central", "Decisão", "Desejo", "Aversão", "Medo", "Gosto", "Amor", "Posse"],
+  shadow: ["Vermelho", "Laranja", "Amarelo", "Verde", "Azul", "Roxo", "Marrom", "Magenta"],
+  ambria: ["Guerreiro de Clã", "Cultista", "Brigante", "Caçador de Tesouros", "Caçador de Bruxas", "Gato-égua", "Kanaran", "Violing"],
+  darkDavokar: ["Caminhante de Cripta", "Necromago", "Dragoul", "Besta do Flagelo Primal", "Nascido do Flagelo", "Violing", "Libélula", "Lindworm"]
+};
+
+const travelSpeeds = {
+  normal: { ambria: 20, clara: 20, escura: 10 },
+  forced: { ambria: 40, clara: 30, escura: 15 },
+  death: { ambria: 60, clara: 40, escura: 20 },
+  mounted: { ambria: 40, clara: 30, escura: 10 }
+};
+
+const davokarTerrainTable = [
+  { max: 10, name: "Nada especial", effect: "" },
+  { max: 12, name: "Facilmente atravessável", effect: "O grupo percorre +10 km" },
+  { max: 14, name: "Pântano/Brejo", effect: "O grupo percorre -5 km" },
+  { max: 16, name: "Dolina (Sinkhole)", effect: "Teste de Vigilant ou 1D8 de dano de queda" },
+  { max: 18, name: "Esporos venenosos", effect: "Teste de Strong ou 3 de dano por 3 turnos" },
+  { max: 20, name: "Terreno Vingativo", effect: "Encontro com criaturas do local" },
+  { max: 100, name: "Natureza Corrompida", effect: "Perigos da Natureza Corrompida" }
+];
+
+const ruinTypesTable = [
+  { max: 7, type: "Nenhuma", finds: 0 },
+  { max: 10, type: "Desmoronada ou Saqueada", finds: 0 },
+  { max: 12, type: "Pequena, muito danificada", finds: "1d4+2" },
+  { max: 16, type: "Pequena, bem preservada", finds: "1d8+2" },
+  { max: 19, type: "Média, dilatada", finds: "2d8+2" },
+  { max: 100, type: "Grande, bem preservada", finds: "3d12+2" }
+];
+
+const enemyScalingTable = [
+  { max: 8, level: "Nenhum", count: 0 },
+  { max: 10, level: "Fracos", count: 1 }, // Multiplicado por PC#
+  { max: 14, level: "Ordinários", count: 1 },
+  { max: 18, level: "Fortes", count: 1 },
+  { max: 100, level: "Poderosos", count: 1 }
+];
+
+const hiringCosts = [
+  { rank: "Fraco", cost: "1 orteg", example: "Trabalhador, Escudeiro" },
+  { rank: "Ordinário", cost: "1 xelim", example: "Arqueiro, Guerreiro de Vila" },
+  { rank: "Desafiador", cost: "1 taler", example: "Guarda, Oficial" },
+  { rank: "Forte", cost: "5 taleres", example: "Cavaleiro, Mestre de Ordem" }
+];
+
+const corruptNatureTable = [
+  { max: 1, name: "Corrupção Virulenta", effect: "Teste de Strong ou 1D4 corrupção temporária por hora/cena." },
+  { max: 2, name: "Corrupção Virulenta", effect: "Teste de Strong ou 1D6 corrupção temporária por hora/cena." },
+  { max: 3, name: "Corrupção Virulenta", effect: "Todos sofrem 1D4 corrupção temporária por hora/cena." },
+  { max: 4, name: "Corrupção Virulenta", effect: "Todos sofrem 1D6 corrupção temporária por hora/cena; Teste de Strong falho concede 1 corrupção permanente." },
+  { max: 5, name: "Retaliação", effect: "Toda corrupção temporária gerada na área é dobrada." },
+  { max: 10, name: "Névoa Corruptora", effect: "Visibilidade reduzida e 1D4 corrupção temporária ao entrar." },
+  { max: 15, name: "Sombra Faminta", effect: "A sombra dos personagens parece se desprender, causando 1D6 de dano temporário à Resolute." },
+  { max: 20, name: "Eco de Symbar", effect: "Sussurros do passado causam 1D8 de corrupção temporária e confusão mental." }
+];
+
+function getProceduralEvent(day: number, terrain: string): { log: string, stop: boolean, distMod: number, damage?: string, corruption?: number, permCorruption?: number } {
+  // Seasons
+  let eventChance = 0.5;
+  if (day >= 92 && day <= 182) eventChance = 0.75; // Verão
+  else if (day >= 183 && day <= 273) eventChance = 0.5; // Outono
+  else if (day >= 274 && day <= 365) eventChance = 0.25; // Inverno
+
+  let log = "";
+  let stop = false;
+  let distMod = 0;
+  let damage = "";
+  let corruption = 0;
+  let permCorruption = 0;
+
+  // Terrain Roll (Tabela 29)
+  if (terrain.includes("Davokar")) {
+    let terrainRoll = Math.floor(Math.random() * 20) + 1;
+    if (terrain === "Davokar Escura") terrainRoll += 5; // Modificador de +5 em Davokar Escura
+
+    const terrainEvent = davokarTerrainTable.find(t => terrainRoll <= t.max) || davokarTerrainTable[0];
+    log += `🌍 **Terreno:** ${terrainEvent.name}. ${terrainEvent.effect}\n`;
+    
+    if (terrainEvent.name === "Facilmente atravessável") distMod = 10;
+    if (terrainEvent.name === "Pântano/Brejo") distMod = -5;
+    if (terrainEvent.name === "Dolina (Sinkhole)") damage = "1d8";
+    if (terrainEvent.name === "Esporos venenosos") damage = "3"; // 3 turns
+    if (terrainEvent.name === "Terreno Vingativo") stop = true;
+
+    if (terrainEvent.name === "Natureza Corrompida") {
+      const corruptRoll = Math.floor(Math.random() * 20) + 1;
+      const corruptEvent = corruptNatureTable.find(c => corruptRoll <= c.max) || corruptNatureTable[corruptNatureTable.length - 1];
+      log += `💀 **PERIGO:** ${corruptEvent.name}. ${corruptEvent.effect}\n`;
+      
+      if (corruptRoll === 1) corruption = Math.floor(Math.random() * 4) + 1;
+      else if (corruptRoll === 2) corruption = Math.floor(Math.random() * 6) + 1;
+      else if (corruptRoll === 3) corruption = Math.floor(Math.random() * 4) + 1;
+      else if (corruptRoll === 4) {
+        corruption = Math.floor(Math.random() * 6) + 1;
+        permCorruption = 1;
+      }
+    }
+  }
+
+  if (Math.random() > eventChance) {
+    log += "🌲 Jornada tranquila.";
+    return { log, stop, distMod, damage, corruption, permCorruption };
+  }
+
+  const roll = Math.floor(Math.random() * 20) + 1;
+  if (roll <= 8) {
+    log += `🌲 Encontraram uma **${travelEvents.ruin[Math.floor(Math.random() * travelEvents.ruin.length)]}**.`;
+  } else if (roll <= 13) {
+    log += `👥 Avistaram **${travelEvents.encounter[Math.floor(Math.random() * travelEvents.encounter.length)]}** ao longe.`;
+  } else if (roll <= 18) {
+    const enemy = travelEvents.enemy[Math.floor(Math.random() * travelEvents.enemy.length)];
+    log += `⚔️ **EMBOSCADA!** ${enemy} atacam o grupo!`;
+    stop = true;
+  } else {
+    log += `⛰️ Obstáculo: **${travelEvents.terrain[Math.floor(Math.random() * travelEvents.terrain.length)]}**.`;
+  }
+
+  return { log, stop, distMod, damage, corruption, permCorruption };
+}
 
 const commandList = [
   // ⚔️ Ações de Combate
@@ -125,6 +339,8 @@ const commandList = [
   // ⭐ Experiência
   { name: 'xp', description: 'Mostra experiência' },
   { name: 'treinar', description: 'Evolui habilidades' },
+  { name: 'viajar', description: 'Viaja para uma nova localização' },
+  { name: 'explorar', description: 'Explora a localização atual' },
   { name: '/poder', description: 'Consulta Poderes Místicos e Rituais' },
   { name: '/equipamento', description: 'Consulta Armas, Armaduras e Escudos' },
   { name: '/furia', description: 'Ativa ou desativa o modo Fúria (Berserker)' },
@@ -136,6 +352,9 @@ const commandList = [
   { name: '/witchsight', description: 'Visão de Bruxo (Witch Hunter)' },
   { name: '/beastlore', description: 'Revela fraquezas de feras (Monster Hunter)' },
   { name: '/armadilha', description: 'Prepara uma armadilha (Sapper)' },
+  { name: 'capitulo', description: 'Inicia ou visualiza o Capítulo atual (365 turnos)' },
+  { name: 'oraculo', description: 'Pergunta ao Oráculo (Sim/Não)' },
+  { name: 'prompt', description: 'Gera um prompt criativo para a cena' },
 ];
 
 function parseCharacterText(text: string): Partial<Character> {
@@ -272,7 +491,9 @@ function getCharacter(userId: string, username: string): Character {
       learnedAbilities: [],
       equipment: {},
       status: {},
-      creationStep: 1
+      inventory: { rations: 10, hasLicense: false, hasMount: false },
+      creationStep: 1,
+      currentLocation: 'yndaros'
     };
     characters.set(userId, char);
   }
@@ -388,9 +609,6 @@ if (token && clientId) {
 
   const commands = [
     new SlashCommandBuilder()
-      .setName('registrar')
-      .setDescription('Registra sua ficha colando o template de texto'),
-    new SlashCommandBuilder()
       .setName('ficha')
       .setDescription('Gerencia sua ficha de personagem')
       .addSubcommand(subcommand =>
@@ -423,181 +641,60 @@ if (token && clientId) {
         subcommand
           .setName('ver')
           .setDescription('Visualiza sua ficha atual')
-      ),
-    new SlashCommandBuilder()
-      .setName('teste')
-      .setDescription('Rola um teste usando um atributo da sua ficha')
-      .addStringOption(option =>
-        option.setName('atributo')
-          .setDescription('Atributo a ser testado')
-          .setRequired(true)
-          .addChoices(
-            { name: 'Precisão (Accurate)', value: 'precisao' },
-            { name: 'Astúcia (Cunning)', value: 'astucia' },
-            { name: 'Discrição (Discreet)', value: 'discricao' },
-            { name: 'Persuasão (Persuasive)', value: 'persuasao' },
-            { name: 'Agilidade (Quick)', value: 'agilidade' },
-            { name: 'Resolução (Resolute)', value: 'resolucao' },
-            { name: 'Força (Strong)', value: 'forca' },
-            { name: 'Vigilância (Vigilant)', value: 'vigilancia' }
+      )
+      .addSubcommand(subcommand =>
+        subcommand
+          .setName('aprender')
+          .setDescription('Aprende ou melhora uma habilidade (custa XP)')
+          .addStringOption(o => o.setName('categoria').setDescription('Categoria').setRequired(true).addChoices(
+            { name: 'Traço', value: 'Traço' },
+            { name: 'Poder', value: 'Poder' },
+            { name: 'Habilidade', value: 'Habilidade' },
+            { name: 'Ritual', value: 'Ritual' }
           ))
-      .addIntegerOption(option =>
-        option.setName('modificador')
-          .setDescription('Modificador do oponente (ex: -2)')
-          .setRequired(false)),
-    new SlashCommandBuilder()
-      .setName('roll')
-      .setDescription('Rola um d20 puro'),
-    new SlashCommandBuilder()
-      .setName('conjurar')
-      .setDescription('Conjura um poder místico ou ritual')
-      .addStringOption(o => o.setName('poder').setDescription('Nome do poder').setRequired(true).setAutocomplete(true)),
-    new SlashCommandBuilder()
-      .setName('atacar')
-      .setDescription('Realiza um ataque usando uma arma do inventário')
-      .addStringOption(o => o.setName('arma').setDescription('Arma utilizada').setRequired(true).setAutocomplete(true))
-      .addStringOption(o => o.setName('atributo').setDescription('Atributo base (padrão: Precisão)').setRequired(false).addChoices(
+          .addStringOption(o => o.setName('nome').setDescription('Nome da habilidade').setRequired(true).setAutocomplete(true))
+          .addStringOption(o => o.setName('nivel').setDescription('Nível').setRequired(true).addChoices(
+            { name: 'Novato (10 XP)', value: 'Novato' },
+            { name: 'Adepto (20 XP)', value: 'Adepto' },
+            { name: 'Mestre (30 XP)', value: 'Mestre' }
+          ))
+      ),
+    new SlashCommandBuilder().setName('golpear').setDescription('Ataca o alvo mais relevante.'),
+    new SlashCommandBuilder().setName('poder').setDescription('Ativa qualquer habilidade da ficha.').addStringOption(o => o.setName('nome').setDescription('Nome do poder').setRequired(true).setAutocomplete(true)),
+    new SlashCommandBuilder().setName('avancar').setDescription('Move, flanqueia ou entra em combate.'),
+    new SlashCommandBuilder().setName('retirar').setDescription('Sai do combate, sofrendo ataque livre se necessário.'),
+    new SlashCommandBuilder().setName('erguer').setDescription('Levanta-se do chão (consome Movimento).'),
+    new SlashCommandBuilder().setName('visar').setDescription('Garante linha de visão ou bônus de mira.'),
+    new SlashCommandBuilder().setName('bloquear').setDescription('Defesa contra ataque.'),
+    new SlashCommandBuilder().setName('contra').setDescription('Ataque Livre.'),
+    new SlashCommandBuilder().setName('ferir').setDescription('Aplica dano ao personagem.').addIntegerOption(o => o.setName('valor').setDescription('Quantidade de dano').setRequired(true)),
+    new SlashCommandBuilder().setName('estado').setDescription('Mostra Toughness e condições atuais.'),
+    new SlashCommandBuilder().setName('agonizar').setDescription('Entra em estado de morte.'),
+    new SlashCommandBuilder().setName('sorte').setDescription('Rola Teste de Morte.'),
+    new SlashCommandBuilder().setName('curar').setDescription('Cura o personagem.').addIntegerOption(o => o.setName('valor').setDescription('Quantidade de cura').setRequired(true)),
+    new SlashCommandBuilder().setName('elixir').setDescription('Usa um elixir do inventário.'),
+    new SlashCommandBuilder().setName('cegar').setDescription('Ativa condição de cegueira.'),
+    new SlashCommandBuilder().setName('desengajar').setDescription('Sai do combate sem atacar.'),
+    new SlashCommandBuilder().setName('flanquear').setDescription('Move para vantagem.'),
+    new SlashCommandBuilder().setName('surpreender').setDescription('Tenta emboscar o inimigo.'),
+    new SlashCommandBuilder().setName('vantagem').setDescription('Aplica bônus de vantagem.'),
+    new SlashCommandBuilder().setName('iniciar').setDescription('Começa o combate e rola iniciativa.'),
+    new SlashCommandBuilder().setName('rodada').setDescription('Passa para o próximo turno.'),
+    new SlashCommandBuilder().setName('agir').setDescription('Testes de atributo.').addStringOption(o => o.setName('atributo').setDescription('Atributo a ser testado').setRequired(true).addChoices(
         { name: 'Precisão', value: 'precisao' },
-        { name: 'Força (Punho de Ferro)', value: 'forca' },
-        { name: 'Agilidade (Lâmina Curta)', value: 'agilidade' },
-        { name: 'Astúcia (Tático)', value: 'astucia' },
-        { name: 'Persuasão (Dominar/Finta)', value: 'persuasao' }
-      ))
-      .addIntegerOption(o => o.setName('modificador').setDescription('Modificador do inimigo (ex: -2)').setRequired(false)),
-    new SlashCommandBuilder()
-      .setName('defender')
-      .setDescription('Realiza um teste de defesa')
-      .addStringOption(o => o.setName('armadura').setDescription('Armadura utilizada').setRequired(false).setAutocomplete(true))
-      .addStringOption(o => o.setName('escudo').setDescription('Escudo utilizado').setRequired(false).setAutocomplete(true))
-      .addStringOption(o => o.setName('atributo').setDescription('Atributo base (padrão: Agilidade)').setRequired(false).addChoices(
+        { name: 'Astúcia', value: 'astucia' },
+        { name: 'Discrição', value: 'discricao' },
+        { name: 'Persuasão', value: 'persuasao' },
         { name: 'Agilidade', value: 'agilidade' },
-        { name: 'Vigilância (Sexto Sentido)', value: 'vigilancia' },
-        { name: 'Força (Corpo de Ferro)', value: 'forca' },
-        { name: 'Resolução (Magia de Cajado)', value: 'resolucao' }
-      ))
-      .addIntegerOption(o => o.setName('modificador').setDescription('Modificador do inimigo (ex: -2)').setRequired(false)),
-    new SlashCommandBuilder()
-      .setName('combate')
-      .setDescription('Gerencia a ordem de iniciativa do combate')
-      .addSubcommand(s => s.setName('entrar').setDescription('Adiciona seu personagem ao combate atual'))
-      .addSubcommand(s => s.setName('inimigo')
-        .setDescription('Adiciona um inimigo ao combate')
-        .addStringOption(o => o.setName('nome').setDescription('Nome do inimigo').setRequired(true))
-        .addIntegerOption(o => o.setName('agilidade').setDescription('Agilidade do inimigo').setRequired(true))
-        .addIntegerOption(o => o.setName('vigilancia').setDescription('Vigilância do inimigo').setRequired(true))
-      )
-      .addSubcommand(s => s.setName('iniciativa').setDescription('Mostra a ordem de iniciativa atual'))
-      .addSubcommand(s => s.setName('limpar').setDescription('Limpa o rastreador de combate')),
-    new SlashCommandBuilder()
-      .setName('corrupcao')
-      .setDescription('Gerencia a corrupção do seu personagem')
-      .addSubcommand(s => s.setName('adicionar')
-        .setDescription('Adiciona corrupção (rola dados ou valor fixo)')
-        .addStringOption(o => o.setName('tipo').setDescription('Temporária ou Permanente').setRequired(true).addChoices({name: 'Temporária', value: 'temp'}, {name: 'Permanente', value: 'perm'}))
-        .addStringOption(o => o.setName('valor').setDescription('Valor ou rolagem (ex: 1, 1d4)').setRequired(true))
-      )
-      .addSubcommand(s => s.setName('limpar')
-        .setDescription('Zera a corrupção temporária (fim da cena)')
-      ),
-    new SlashCommandBuilder()
-      .setName('habilidade')
-      .setDescription('Gerencia as habilidades do seu personagem')
-      .addSubcommand(s => s.setName('aprender')
-        .setDescription('Aprende ou melhora uma habilidade (custa XP)')
-        .addStringOption(o => o.setName('categoria').setDescription('Categoria (Traço, Poder, Habilidade, Ritual)').setRequired(true).addChoices(
-          { name: 'Traço', value: 'Traço' },
-          { name: 'Poder', value: 'Poder' },
-          { name: 'Habilidade', value: 'Habilidade' },
-          { name: 'Ritual', value: 'Ritual' }
-        ))
-        .addStringOption(o => o.setName('nome').setDescription('Nome da habilidade').setRequired(true).setAutocomplete(true))
-        .addStringOption(o => o.setName('nivel').setDescription('Nível da habilidade').setRequired(true).addChoices(
-          { name: 'Novato (10 XP)', value: 'Novato' },
-          { name: 'Adepto (20 XP)', value: 'Adepto' },
-          { name: 'Mestre (30 XP)', value: 'Mestre' }
-        ))
-      )
-      .addSubcommand(s => s.setName('ver')
-        .setDescription('Ver detalhes de uma habilidade')
-        .addStringOption(o => o.setName('nome').setDescription('Nome da habilidade').setRequired(true).setAutocomplete(true))
-      )
-      .addSubcommand(s => s.setName('lista')
-        .setDescription('Lista todas as habilidades do jogo')
-      ),
-    new SlashCommandBuilder()
-      .setName('xp')
-      .setDescription('Gerencia seus Pontos de Experiência')
-      .addSubcommand(s => s.setName('adicionar').setDescription('Ganha XP').addIntegerOption(o => o.setName('valor').setDescription('Quantidade de XP').setRequired(true)))
-      .addSubcommand(s => s.setName('ver').setDescription('Mostra seu XP atual')),
-    new SlashCommandBuilder()
-      .setName('traco')
-      .setDescription('Consulta Traços Monstruosos do jogo')
-      .addSubcommand(s => s.setName('ver')
-        .setDescription('Ver detalhes de um Traço Monstruoso')
-        .addStringOption(o => o.setName('nome').setDescription('Nome do traço').setRequired(true).setAutocomplete(true))
-      )
-      .addSubcommand(s => s.setName('lista')
-        .setDescription('Lista todos os Traços Monstruosos')
-      ),
-    new SlashCommandBuilder()
-      .setName('tradicao')
-      .setDescription('Consulta Tradições Místicas do jogo')
-      .addSubcommand(s => s.setName('ver')
-        .setDescription('Ver detalhes de uma Tradição Mística')
-        .addStringOption(o => o.setName('nome').setDescription('Nome da tradição').setRequired(true).setAutocomplete(true))
-      )
-      .addSubcommand(s => s.setName('lista')
-        .setDescription('Lista todas as Tradições Místicas')
-      ),
-    new SlashCommandBuilder()
-      .setName('poder')
-      .setDescription('Consulta Poderes Místicos e Rituais do jogo')
-      .addSubcommand(s => s.setName('ver')
-        .setDescription('Ver detalhes de um Poder Místico ou Ritual')
-        .addStringOption(o => o.setName('nome').setDescription('Nome do poder').setRequired(true).setAutocomplete(true))
-      )
-      .addSubcommand(s => s.setName('lista')
-        .setDescription('Lista todos os Poderes Místicos e Rituais')
-      ),
-    new SlashCommandBuilder()
-      .setName('equipamento')
-      .setDescription('Consulta Armas, Armaduras e Escudos do jogo')
-      .addSubcommand(s => s.setName('ver')
-        .setDescription('Ver detalhes de um equipamento')
-        .addStringOption(o => o.setName('nome').setDescription('Nome do equipamento').setRequired(true).setAutocomplete(true))
-      )
-      .addSubcommand(s => s.setName('lista')
-        .setDescription('Lista todos os equipamentos por categoria')
-      ),
-    new SlashCommandBuilder()
-      .setName('furia')
-      .setDescription('Ativa ou desativa o modo Fúria (Berserker)'),
-    new SlashCommandBuilder()
-      .setName('proteger')
-      .setDescription('Protege um aliado, transferindo dano para você (Honor Guard)')
-      .addUserOption(o => o.setName('aliado').setDescription('Aliado a ser protegido').setRequired(true)),
-    new SlashCommandBuilder()
-      .setName('veneno')
-      .setDescription('Aplica veneno na arma (Assassin)'),
-    new SlashCommandBuilder()
-      .setName('explorar')
-      .setDescription('Realiza um teste de exploração (Explorer)'),
-    new SlashCommandBuilder()
-      .setName('bind')
-      .setDescription('Vincula um artefato para reduzir corrupção (Artifact Crafter)'),
-    new SlashCommandBuilder()
-      .setName('transformar')
-      .setDescription('Transforma-se em uma forma animal (Witch)'),
-    new SlashCommandBuilder()
-      .setName('witchsight')
-      .setDescription('Ativa a Visão de Bruxo para revelar a Sombra (Witch Hunter)'),
-    new SlashCommandBuilder()
-      .setName('beastlore')
-      .setDescription('Revela informações sobre uma fera (Monster Hunter)')
-      .addStringOption(o => o.setName('inimigo').setDescription('Nome do inimigo').setRequired(true)),
-    new SlashCommandBuilder()
-      .setName('armadilha')
-      .setDescription('Prepara uma armadilha (Sapper)'),
+        { name: 'Resolução', value: 'resolucao' },
+        { name: 'Força', value: 'forca' },
+        { name: 'Vigilância', value: 'vigilancia' }
+    )),
+    new SlashCommandBuilder().setName('dialogar').setDescription('Inicia cena social ou teste de Persuasão.'),
+    new SlashCommandBuilder().setName('xp').setDescription('Mostra experiência atual.'),
+    new SlashCommandBuilder().setName('treinar').setDescription('Evolui habilidades.').addStringOption(o => o.setName('nome').setDescription('Nome da habilidade').setRequired(true).setAutocomplete(true)),
+    new SlashCommandBuilder().setName('viajar').setDescription('Viaja para uma nova localização.'),
+    new SlashCommandBuilder().setName('explorar').setDescription('Explora a localização atual.'),
   ];
 
   const rest = new REST({ version: '10' }).setToken(token);
@@ -619,8 +716,15 @@ if (token && clientId) {
       const focusedValue = focusedOption.value.toLowerCase();
       let choices: {name: string, value: string}[] = [];
       
-      if (interaction.commandName === 'habilidade') {
-        choices = abilities.filter(a => a.name.toLowerCase().includes(focusedValue)).slice(0, 25).map(choice => ({ name: choice.name, value: choice.id }));
+      if (interaction.commandName === 'habilidade' || (interaction.commandName === 'ficha' && interaction.options.getSubcommand() === 'aprender') || interaction.commandName === 'treinar') {
+        const categoria = interaction.options.getString('categoria');
+        if (categoria === 'Traço') {
+          choices = traits.filter(t => t.name.toLowerCase().includes(focusedValue)).slice(0, 25).map(choice => ({ name: choice.name, value: choice.id }));
+        } else if (categoria === 'Poder' || categoria === 'Ritual') {
+          choices = powers.filter(p => p.name.toLowerCase().includes(focusedValue)).slice(0, 25).map(choice => ({ name: choice.name, value: choice.id }));
+        } else {
+          choices = abilities.filter(a => a.name.toLowerCase().includes(focusedValue)).slice(0, 25).map(choice => ({ name: choice.name, value: choice.id }));
+        }
       } else if (interaction.commandName === 'traco') {
         choices = traits.filter(t => t.name.toLowerCase().includes(focusedValue)).slice(0, 25).map(choice => ({ name: choice.name, value: choice.id }));
       } else if (interaction.commandName === 'tradicao') {
@@ -790,12 +894,431 @@ if (token && clientId) {
         const char = getCharacter(interaction.user.id, interaction.user.username);
         char.raceVariant = interaction.values[0];
         await goToStep3(interaction, char);
+      } else if (interaction.customId === 'select_travel') {
+        const char = getCharacter(interaction.user.id, interaction.user.username);
+        const destinationId = interaction.values[0];
+        const destination = locations.find(l => l.id === destinationId);
+        const origin = locations.find(l => l.id === char.currentLocation) || locations[0];
+        const travelInfo = origin.destinations.find(d => d.id === destinationId);
+
+        if (!destination || !travelInfo) return;
+
+        // Set up active travel state
+        char.activeTravel = {
+          destinationId,
+          totalDistance: travelInfo.distance,
+          distanceRemaining: travelInfo.distance,
+          currentDay: 0,
+          pace: 'normal',
+          isRiverTravel: false,
+          log: `🚀 **Preparando Viagem: ${origin.name} ➔ ${destination.name}**\nDistância: ${travelInfo.distance}km\n\n`
+        };
+
+        const marchSelect = new StringSelectMenuBuilder()
+          .setCustomId('select_travel_options')
+          .setPlaceholder('Escolha o ritmo e a via')
+          .addOptions([
+            { label: 'Marcha Normal (Terrestre)', value: 'normal_land', description: 'Ritmo padrão, permite cura natural.' },
+            { label: 'Marcha Forçada (Terrestre)', value: 'forced_land', description: 'Ritmo acelerado, impede cura natural.' },
+            { label: 'Marcha da Morte (Terrestre)', value: 'death_land', description: 'Ritmo extremo, risco de exaustão.' },
+            { label: 'Via Rio (Normal)', value: 'normal_river', description: 'Navegação fluvial, terreno mais fácil.' },
+            { label: 'Via Rio (Forçada)', value: 'forced_river', description: 'Navegação rápida, impede cura natural.' }
+          ]);
+
+        const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(marchSelect);
+
+        await interaction.update({
+          content: `📍 **Destino Selecionado: ${destination.name}**\nComo vocês pretendem viajar?`,
+          components: [row]
+        });
+      } else if (interaction.customId === 'select_travel_options') {
+        const char = getCharacter(interaction.user.id, interaction.user.username);
+        if (!char.activeTravel) return;
+
+        const option = interaction.values[0];
+        char.activeTravel.pace = option.split('_')[0] as any;
+        char.activeTravel.isRiverTravel = option.endsWith('river');
+
+        const destination = locations.find(l => l.id === char.activeTravel!.destinationId);
+        const origin = locations.find(l => l.id === char.currentLocation) || locations[0];
+        const travelInfo = origin.destinations.find(d => d.id === char.activeTravel!.destinationId);
+
+        if (!destination || !travelInfo) return;
+
+        // --- Cálculo de Tempo de Viagem Estimado ---
+        let terrainLevel = origin.terrain;
+        if (char.activeTravel.isRiverTravel) {
+          if (terrainLevel === 'Davokar Escura') terrainLevel = 'Davokar Clara';
+          else if (terrainLevel === 'Davokar Clara') terrainLevel = 'Ambria';
+        }
+
+        const terrainKey = terrainLevel === 'Davokar Escura' ? 'escura' : (terrainLevel === 'Davokar Clara' ? 'clara' : 'ambria');
+        let kmPerDay = travelSpeeds[char.activeTravel.pace][terrainKey];
+        if (char.inventory?.hasMount && terrainLevel === 'Ambria' && char.activeTravel.pace === 'normal') {
+          kmPerDay = travelSpeeds.mounted.ambria;
+        }
+
+        const estimatedDays = Math.ceil(travelInfo.distance / kmPerDay);
+        const totalRations = estimatedDays;
+
+        // Check license
+        let licenseStatus = "Não necessária";
+        if (destination.terrain !== 'Ambria') {
+          licenseStatus = char.inventory?.hasLicense ? "✅ Ativa" : "❌ Ausente (Risco de Patrulha)";
+        }
+
+        const embed = {
+          title: `🧭 Menu de Expedição: ${destination.name}`,
+          color: 0xdaa520, // Dourado
+          fields: [
+            { name: '🕒 Turnos Estimados', value: `${estimatedDays} dias`, inline: true },
+            { name: '🍞 Suprimentos', value: `${totalRations} rações necessárias`, inline: true },
+            { name: '📜 Licença', value: licenseStatus, inline: true },
+            { name: '🏃 Ritmo', value: char.activeTravel.pace.charAt(0).toUpperCase() + char.activeTravel.pace.slice(1), inline: true },
+            { name: '🛶 Via', value: char.activeTravel.isRiverTravel ? 'Rio' : 'Terrestre', inline: true }
+          ],
+          description: char.activeTravel.log
+        };
+
+        const startBtn = new ButtonBuilder()
+          .setCustomId('start_travel_turn')
+          .setLabel('Iniciar Turno')
+          .setStyle(ButtonStyle.Primary);
+
+        const campBtn = new ButtonBuilder()
+          .setCustomId('camp_rest')
+          .setLabel('Acampar/Descansar')
+          .setStyle(ButtonStyle.Secondary);
+
+        const invBtn = new ButtonBuilder()
+          .setCustomId('view_inventory')
+          .setLabel('Inventário')
+          .setStyle(ButtonStyle.Secondary);
+
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(startBtn, campBtn, invBtn);
+
+        await interaction.update({
+          content: null,
+          embeds: [embed],
+          components: [row]
+        });
+      } else if (interaction.customId === 'select_explore') {
+        const char = getCharacter(interaction.user.id, interaction.user.username);
+        const option = interaction.values[0];
+        const location = locations.find(l => l.id === char.currentLocation) || locations[0];
+
+        if (option === 'Explorar Profundezas' || option === 'Explorar Ruínas Reais') {
+          // --- Preparar Expedição (10 Turnos Fixos) ---
+          char.activeExpedition = {
+            locationId: location.id,
+            totalDays: 10,
+            currentDay: 0,
+            log: `🌲 **Iniciando Expedição em ${location.name}**\nFase de exploração ativa (10 dias).\n\n`
+          };
+
+          const embed = {
+            title: `🧭 Menu de Expedição: ${location.name}`,
+            color: 0x10b981,
+            fields: [
+              { name: '🕒 Turnos Estimados', value: `10 dias`, inline: true },
+              { name: '🍞 Suprimentos', value: `10 rações necessárias`, inline: true },
+              { name: '📜 Licença', value: char.inventory?.hasLicense ? "✅ Ativa" : "❌ Ausente", inline: true }
+            ],
+            description: char.activeExpedition.log
+          };
+
+          const startBtn = new ButtonBuilder()
+            .setCustomId('start_expedition_turn')
+            .setLabel('Iniciar Turno')
+            .setStyle(ButtonStyle.Primary);
+
+          const campBtn = new ButtonBuilder()
+            .setCustomId('camp_rest')
+            .setLabel('Acampar/Descansar')
+            .setStyle(ButtonStyle.Secondary);
+
+          const row = new ActionRowBuilder<ButtonBuilder>().addComponents(startBtn, campBtn);
+
+          await interaction.update({
+            content: null,
+            embeds: [embed],
+            components: [row]
+          });
+        } else {
+          await interaction.update({
+            content: `📍 Em **${location.name}**, você escolheu: **${option}**.\n\n*(Ação narrativa em desenvolvimento...)*`,
+            components: []
+          });
+        }
       }
       return;
     }
 
     if (interaction.isButton()) {
-      if (interaction.customId === 'apply_occupation_package') {
+      if (interaction.customId === 'start_travel_turn') {
+        const char = getCharacter(interaction.user.id, interaction.user.username);
+        if (!char.activeTravel) return;
+
+        char.activeTravel.currentDay++;
+        const day = char.activeTravel.currentDay;
+        const origin = locations.find(l => l.id === char.currentLocation) || locations[0];
+        const destination = locations.find(l => l.id === char.activeTravel.destinationId);
+
+        if (!destination) return;
+
+        let dayLog = `**Dia ${day}:** `;
+
+        // --- Consumo de Ração ---
+        if ((char.inventory?.rations || 0) > 0) {
+          char.inventory!.rations--;
+          char.inventory!.starvationDays = 0;
+        } else {
+          char.inventory!.starvationDays = (char.inventory!.starvationDays || 0) + 1;
+          dayLog += `⚠️ **FOME!** Sem rações. `;
+        }
+
+        // --- Corrupção Ambiental (Dark Davokar) ---
+        if (origin.terrain === 'Davokar Escura') {
+          const corr = Math.floor(Math.random() * 4) + 1;
+          char.corruption.temp += corr;
+          dayLog += `⚰️ Corrupção (+${corr}). `;
+        }
+
+        // --- Cálculo de Distância Percorrida ---
+        let terrainLevel = origin.terrain;
+        const pace = char.activeTravel.pace;
+        if (char.activeTravel.isRiverTravel) {
+          if (terrainLevel === 'Davokar Escura') terrainLevel = 'Davokar Clara';
+          else if (terrainLevel === 'Davokar Clara') terrainLevel = 'Ambria';
+        }
+
+        const terrainKey = terrainLevel === 'Davokar Escura' ? 'escura' : (terrainLevel === 'Davokar Clara' ? 'clara' : 'ambria');
+        let kmPerDay = travelSpeeds[char.activeTravel.pace][terrainKey];
+        if (char.inventory?.hasMount && terrainLevel === 'Ambria' && char.activeTravel.pace === 'normal') {
+          kmPerDay = travelSpeeds.mounted.ambria;
+        }
+
+        // --- Eventos Procedurais ---
+        const event = getProceduralEvent(char.chapter?.currentDay || 1, origin.terrain);
+        dayLog += event.log + '\n';
+        kmPerDay += event.distMod;
+        
+        if (event.corruption) char.corruption.temp += event.corruption;
+        if (event.permCorruption) char.corruption.perm += event.permCorruption;
+
+        if (event.damage) {
+          dayLog += `💥 Perigo: ${event.damage} de dano. `;
+        }
+
+        char.activeTravel.distanceRemaining -= kmPerDay;
+        if (char.activeTravel.distanceRemaining < 0) char.activeTravel.distanceRemaining = 0;
+
+        dayLog += `📍 Distância: **${kmPerDay} km** percorridos. Restam: **${char.activeTravel.distanceRemaining} km**.\n`;
+
+        // Update Chapter Day
+        if (char.chapter) {
+          char.chapter.currentDay++;
+          if (char.chapter.currentDay > 365) char.chapter.currentDay = 1;
+        }
+
+        char.activeTravel.log += dayLog;
+        let stopTravel = event.stop;
+
+        const isFinished = char.activeTravel.distanceRemaining <= 0;
+        if (isFinished && !stopTravel) {
+          char.currentLocation = char.activeTravel.destinationId;
+          const finalEmbed = {
+            title: `📍 Chegada em ${destination.name}`,
+            color: 0x10b981,
+            description: char.activeTravel.log + `\n✅ **Viagem concluída com sucesso!**`,
+            footer: { text: `Rações: ${char.inventory?.rations} | Corrupção: ${char.corruption.temp}/${char.corruption.perm}` }
+          };
+          char.activeTravel = undefined;
+          await interaction.update({ embeds: [finalEmbed], components: [] });
+        } else {
+          const embed = {
+            title: stopTravel ? `⚔️ Viagem Interrompida!` : `🧭 Menu de Expedição: ${destination.name}`,
+            color: stopTravel ? 0xef4444 : 0xdaa520,
+            description: char.activeTravel.log,
+            fields: [
+              { name: '🕒 Progresso', value: `${char.activeTravel.totalDistance - char.activeTravel.distanceRemaining}/${char.activeTravel.totalDistance} km`, inline: true },
+              { name: '🍞 Suprimentos', value: `${char.inventory?.rations} rações`, inline: true },
+              { name: '🏃 Ritmo', value: char.activeTravel.pace.charAt(0).toUpperCase() + char.activeTravel.pace.slice(1), inline: true }
+            ]
+          };
+
+          const startBtn = new ButtonBuilder()
+            .setCustomId('start_travel_turn')
+            .setLabel('Próximo Turno')
+            .setStyle(ButtonStyle.Primary)
+            .setDisabled(stopTravel);
+
+          const campBtn = new ButtonBuilder()
+            .setCustomId('camp_rest')
+            .setLabel('Acampar/Descansar')
+            .setStyle(ButtonStyle.Secondary);
+
+          const row = new ActionRowBuilder<ButtonBuilder>().addComponents(startBtn, campBtn);
+          await interaction.update({ embeds: [embed], components: [row] });
+        }
+
+      } else if (interaction.customId === 'start_expedition_turn') {
+        const char = getCharacter(interaction.user.id, interaction.user.username);
+        if (!char.activeExpedition) return;
+
+        char.activeExpedition.currentDay++;
+        const day = char.activeExpedition.currentDay;
+        const location = locations.find(l => l.id === char.activeExpedition.locationId) || locations[0];
+
+        let dayLog = `**Dia ${day}:** `;
+
+        // --- Consumo de Ração ---
+        if ((char.inventory?.rations || 0) > 0) {
+          char.inventory!.rations--;
+          char.inventory!.starvationDays = 0;
+        } else {
+          char.inventory!.starvationDays = (char.inventory!.starvationDays || 0) + 1;
+          dayLog += `⚠️ **FOME!** `;
+        }
+
+        // --- Corrupção Ambiental ---
+        if (location.terrain === 'Davokar Escura') {
+          const corr = Math.floor(Math.random() * 4) + 1;
+          char.corruption.temp += corr;
+          dayLog += `⚰️ Corrupção (+${corr}). `;
+        }
+
+        // --- Risco de Permanência (Discreet) ---
+        let stopExpedition = false;
+        if (day >= 2) {
+          const discreetAttr = char.attributes.discricao;
+          const stealthRoll = Math.floor(Math.random() * 20) + 1;
+          if (stealthRoll > (discreetAttr - 2)) { // Penalidade por permanência
+            dayLog += `⚠️ **DESCOBERTOS!** Predadores locais sentiram sua presença!\n`;
+            stopExpedition = true;
+          }
+        }
+
+        if (!stopExpedition) {
+          // Eventos Procedurais
+          const event = getProceduralEvent(char.chapter?.currentDay || 1, location.terrain);
+          dayLog += event.log + ' ';
+          if (event.stop) stopExpedition = true;
+          
+          if (event.corruption) char.corruption.temp += event.corruption;
+          if (event.permCorruption) char.corruption.perm += event.permCorruption;
+
+          // Teste de Orientação (Vigilant)
+          const vigilantAttr = char.attributes.vigilancia;
+          const orientationRoll = Math.floor(Math.random() * 20) + 1;
+          
+          if (orientationRoll <= (vigilantAttr + 2)) {
+            // Tabela 26: Ruínas
+            const ruinRoll = Math.floor(Math.random() * 20) + 1;
+            const ruin = ruinTypesTable.find(r => ruinRoll <= r.max) || ruinTypesTable[0];
+            dayLog += `💎 **Ruína Encontrada:** ${ruin.type}. `;
+            
+            if (ruin.finds !== 0) {
+              const numFinds = parseAndRoll(ruin.finds as string).total;
+              dayLog += `Achados: ${numFinds}. `;
+              
+              // Tabela 30: Itens (Simplificada)
+              const itemRoll = Math.floor(Math.random() * 20) + 1;
+              let category = "Detritos";
+              if (location.terrain === 'Davokar Clara') {
+                if (itemRoll >= 16) category = "Tesouro Místico";
+                else if (itemRoll >= 6) category = "Curiosidade";
+              } else if (location.terrain === 'Davokar Escura') {
+                if (itemRoll >= 19) category = "Artefato";
+                else if (itemRoll >= 12) category = "Tesouro Místico";
+                else if (itemRoll >= 3) category = "Curiosidade";
+              }
+              dayLog += `📦 [${category}] `;
+            }
+          } else {
+            dayLog += `🌲 Nada encontrado hoje.\n`;
+          }
+        }
+
+        // Update Chapter Day
+        if (char.chapter) {
+          char.chapter.currentDay++;
+          if (char.chapter.currentDay > 365) char.chapter.currentDay = 1; // Reset year
+        }
+
+        char.activeExpedition.log += dayLog;
+
+        const isFinished = day >= char.activeExpedition.totalDays;
+        if (isFinished || stopExpedition) {
+          const finalEmbed = {
+            title: stopExpedition ? `⚔️ Expedição Interrompida!` : `🏆 Expedição Concluída!`,
+            color: stopExpedition ? 0xef4444 : 0x10b981,
+            description: char.activeExpedition.log + (isFinished ? `\n✅ **Exploração finalizada.**` : `\n❌ **Fuga necessária.**`),
+            footer: { text: `Rações: ${char.inventory?.rations} | Corrupção: ${char.corruption.temp}/${char.corruption.perm}` }
+          };
+          char.activeExpedition = undefined;
+          await interaction.update({ embeds: [finalEmbed], components: [] });
+        } else {
+          const embed = {
+            title: `🧭 Menu de Expedição: ${location.name}`,
+            color: 0x10b981,
+            description: char.activeExpedition.log,
+            fields: [
+              { name: '🕒 Progresso', value: `${day}/${char.activeExpedition.totalDays} dias`, inline: true },
+              { name: '🍞 Suprimentos', value: `${char.inventory?.rations} rações`, inline: true }
+            ]
+          };
+
+          const startBtn = new ButtonBuilder()
+            .setCustomId('start_expedition_turn')
+            .setLabel('Próximo Turno')
+            .setStyle(ButtonStyle.Primary);
+
+          const campBtn = new ButtonBuilder()
+            .setCustomId('camp_rest')
+            .setLabel('Acampar/Descansar')
+            .setStyle(ButtonStyle.Secondary);
+
+          const row = new ActionRowBuilder<ButtonBuilder>().addComponents(startBtn, campBtn);
+          await interaction.update({ embeds: [embed], components: [row] });
+        }
+
+      } else if (interaction.customId === 'camp_rest') {
+        const char = getCharacter(interaction.user.id, interaction.user.username);
+        let msg = "⛺ **Acampamento montado.** ";
+        
+        if (char.activeTravel?.pace === 'forced' || char.activeTravel?.pace === 'death') {
+          msg += "A marcha forçada impede a recuperação natural.";
+        } else if ((char.inventory?.starvationDays || 0) >= 5) {
+          msg += "A privação de comida impede a recuperação natural.";
+        } else {
+          msg += "Vocês descansam e recuperam forças (Cura natural aplicada).";
+          // Logic for natural healing would go here
+        }
+
+        await interaction.reply({ content: msg, ephemeral: true });
+
+      } else if (interaction.customId.startsWith('social_challenge_')) {
+        await interaction.reply({ content: "🎭 **Desafio Social Iniciado.** Role Persuasive ou Cunning para influenciar os nobres ou mercadores locais.", ephemeral: true });
+      } else if (interaction.customId.startsWith('domain_management_')) {
+        await interaction.reply({ content: "🏰 **Gestão de Domínio.** Você revisa suas propriedades, impostos e influência na cidade.", ephemeral: true });
+
+      } else if (interaction.customId === 'view_inventory') {
+        const char = getCharacter(interaction.user.id, interaction.user.username);
+        const inv = char.inventory;
+        const embed = {
+          title: `🎒 Inventário de ${char.name}`,
+          color: 0x2b2d31,
+          fields: [
+            { name: '🍞 Rações', value: `${inv?.rations || 0}`, inline: true },
+            { name: '📜 Licença', value: inv?.hasLicense ? 'Sim' : 'Não', inline: true },
+            { name: '🐎 Montaria', value: inv?.hasMount ? 'Sim' : 'Não', inline: true },
+            { name: '💰 Dinheiro', value: `${char.money?.thaler || 0}T, ${char.money?.xelins || 0}X, ${char.money?.ortegs || 0}O`, inline: false }
+          ]
+        };
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+
+      } else if (interaction.customId === 'apply_occupation_package') {
         const char = getCharacter(interaction.user.id, interaction.user.username);
         const archetype = archetypes.find(a => a.id === char.archetypeId);
         const occupation = archetype?.occupations.find(o => o.id === char.occupationId);
@@ -864,10 +1387,37 @@ if (token && clientId) {
       } else if (interaction.customId === 'go_to_shadow') {
         const char = getCharacter(interaction.user.id, interaction.user.username);
         await goToStep7(interaction, char);
+      } else if (interaction.customId.startsWith('roll_')) {
+        const parts = interaction.customId.split('_');
+        const attrKey = parts[1] as keyof Character['attributes'];
+        const targetUserId = parts[2];
+        
+        const char = characters.get(targetUserId);
+        if (!char) {
+          await interaction.reply({ content: 'Ficha não encontrada.', ephemeral: true });
+          return;
+        }
+
+        const attrValue = char.attributes[attrKey];
+        const roll = Math.floor(Math.random() * 20) + 1;
+        const success = roll <= attrValue;
+        
+        const attrNames: Record<string, string> = {
+          precisao: 'Accurate', astucia: 'Cunning', discricao: 'Discreet', persuasao: 'Persuasive',
+          agilidade: 'Quick', resolucao: 'Resolute', forca: 'Strong', vigilancia: 'Vigilant'
+        };
+
+        const embed = {
+          title: `🎲 Teste de ${attrNames[attrKey]}`,
+          color: success ? 0x10b981 : 0xef4444,
+          description: `**Resultado:** ${roll} (Alvo: ${attrValue})\n**Status:** ${success ? '✅ Sucesso' : '❌ Falha'}`,
+          footer: { text: `Personagem: ${char.name}` }
+        };
+
+        await interaction.reply({ embeds: [embed] });
       }
       return;
     }
-
 
     if (!interaction.isChatInputCommand()) return;
 
@@ -984,18 +1534,63 @@ if (token && clientId) {
         const defense = char.attributes.agilidade + char.armorMod;
         const corruptionThreshold = Math.ceil(char.attributes.resolucao / 2);
 
-        await interaction.reply({
-          embeds: [{
-            title: `Ficha de ${userName} Criada/Atualizada!`,
-            color: 0xd97706, // amber-600
+        const embeds = [
+          {
+            title: `📜 Ficha de ${userName} Criada/Atualizada!`,
+            color: 0x000080, // Navy Blue
+            description: `A jornada em Davokar começa agora.`
+          },
+          {
+            title: `📊 Atributos`,
+            color: 0xd4af37, // Gold
             fields: [
-              { name: '🛡️ Derivados', value: `**Resistência (Toughness):** ${toughness}\n**Limiar de Dor:** ${painThreshold}\n**Defesa:** ${defense}\n**Limiar de Corrupção:** ${corruptionThreshold}`, inline: false },
-              { name: '🌑 Corrupção', value: `**Temporária:** ${char.corruption.temp} | **Permanente:** ${char.corruption.perm}\n**Total:** ${char.corruption.temp + char.corruption.perm} / ${corruptionThreshold}`, inline: false },
-              { name: '✨ Experiência', value: `**XP Disponível:** ${char.xp.unspent} / ${char.xp.total}`, inline: false },
-              { name: '📊 Atributos', value: `Precisão: ${char.attributes.precisao} | Astúcia: ${char.attributes.astucia}\nDiscrição: ${char.attributes.discricao} | Persuasão: ${char.attributes.persuasao}\nAgilidade: ${char.attributes.agilidade} | Resolução: ${char.attributes.resolucao}\nForça: ${char.attributes.forca} | Vigilância: ${char.attributes.vigilancia}`, inline: false },
-              { name: '⚔️ Habilidades', value: char.learnedAbilities.length > 0 ? char.learnedAbilities.map(a => `• ${a.name} (${a.level})`).join('\n') : 'Nenhuma habilidade aprendida.', inline: false }
+              { name: '⚔️ Accurate', value: `${char.attributes.precisao}`, inline: true },
+              { name: '🧠 Cunning', value: `${char.attributes.astucia}`, inline: true },
+              { name: '🌿 Vigilant', value: `${char.attributes.vigilancia}`, inline: true },
+              { name: '🛡️ Strong', value: `${char.attributes.forca}`, inline: true },
+              { name: '⚡ Quick', value: `${char.attributes.agilidade}`, inline: true },
+              { name: '🕯️ Resolute', value: `${char.attributes.resolucao}`, inline: true },
+              { name: '🎭 Persuasive', value: `${char.attributes.persuasao}`, inline: true },
+              { name: '👣 Discreet', value: `${char.attributes.discricao}`, inline: true }
             ]
-          }]
+          },
+          {
+            title: `🛡️ Status & Corrupção`,
+            color: 0x000000, // Black
+            fields: [
+              { name: 'Resistência', value: `${toughness}`, inline: true },
+              { name: 'Limiar de Dor', value: `${painThreshold}`, inline: true },
+              { name: 'Defesa', value: `${defense}`, inline: true },
+              { name: 'Corrupção', value: `Temp: ${char.corruption.temp} | Perm: ${char.corruption.perm}\nTotal: ${char.corruption.temp + char.corruption.perm} / ${corruptionThreshold}`, inline: false }
+            ]
+          },
+          {
+            title: `⚔️ Habilidades & XP`,
+            color: 0x808080, // Gray
+            fields: [
+              { name: 'XP Disponível', value: `${char.xp.unspent} / ${char.xp.total}`, inline: true },
+              { name: 'Habilidades', value: char.learnedAbilities.length > 0 ? char.learnedAbilities.map(a => `• ${a.name} (${a.level})`).join('\n') : 'Nenhuma aprendida.', inline: false }
+            ]
+          }
+        ];
+
+        const row1 = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId(`roll_precisao_${userId}`).setLabel('Accurate').setEmoji('⚔️').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`roll_astucia_${userId}`).setLabel('Cunning').setEmoji('🧠').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`roll_vigilancia_${userId}`).setLabel('Vigilant').setEmoji('🌿').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`roll_forca_${userId}`).setLabel('Strong').setEmoji('🛡️').setStyle(ButtonStyle.Secondary)
+        );
+
+        const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId(`roll_agilidade_${userId}`).setLabel('Quick').setEmoji('⚡').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`roll_resolucao_${userId}`).setLabel('Resolute').setEmoji('🕯️').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`roll_persuasao_${userId}`).setLabel('Persuasive').setEmoji('🎭').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`roll_discricao_${userId}`).setLabel('Discreet').setEmoji('👣').setStyle(ButtonStyle.Secondary)
+        );
+
+        await interaction.reply({
+          embeds: embeds,
+          components: [row1, row2]
         });
       } else if (subcommand === 'ver') {
         const char = characters.get(userId);
@@ -1020,24 +1615,424 @@ if (token && clientId) {
         if (char.status?.poisonApplied) activeStatuses.push('🧪 Veneno Aplicado');
         
         const statusText = activeStatuses.length > 0 ? `\n**Status Ativo:** ${activeStatuses.join(', ')}` : '';
-
         const moneyText = char.money ? `\n💰 **Dinheiro:** ${char.money.thaler || 0} Thaler, ${char.money.xelins || 0} Xelins, ${char.money.ortegs || 0} Ortegs` : '';
+        const location = locations.find(l => l.id === char.currentLocation) || locations[0];
+        const locationText = `\n📍 **Localização:** ${location.name}`;
+
+        const embeds = [
+          {
+            title: `📜 Ficha de ${char.name}`,
+            color: 0x000080, // Navy Blue
+            description: `${raceText}${occupationText}${shadowText}${statusText}${moneyText}${locationText}`
+          },
+          {
+            title: `📊 Atributos`,
+            color: 0xd4af37, // Gold
+            fields: [
+              { name: '⚔️ Accurate', value: `${char.attributes.precisao}`, inline: true },
+              { name: '🧠 Cunning', value: `${char.attributes.astucia}`, inline: true },
+              { name: '🌿 Vigilant', value: `${char.attributes.vigilancia}`, inline: true },
+              { name: '🛡️ Strong', value: `${char.attributes.forca}`, inline: true },
+              { name: '⚡ Quick', value: `${char.attributes.agilidade}`, inline: true },
+              { name: '🕯️ Resolute', value: `${char.attributes.resolucao}`, inline: true },
+              { name: '🎭 Persuasive', value: `${char.attributes.persuasao}`, inline: true },
+              { name: '👣 Discreet', value: `${char.attributes.discricao}`, inline: true }
+            ]
+          },
+          {
+            title: `🛡️ Status & Corrupção`,
+            color: 0x000000, // Black
+            fields: [
+              { name: 'Resistência', value: `${toughness}`, inline: true },
+              { name: 'Limiar de Dor', value: `${painThreshold}`, inline: true },
+              { name: 'Defesa', value: `${defense} *(Agilidade ${char.attributes.agilidade} + Armadura ${char.armorMod})*`, inline: true },
+              { name: 'Corrupção', value: `Temp: ${char.corruption.temp} | Perm: ${char.corruption.perm}\nTotal: ${char.corruption.temp + char.corruption.perm} / ${corruptionThreshold}`, inline: false }
+            ]
+          },
+          {
+            title: `⚔️ Habilidades & XP`,
+            color: 0x808080, // Gray
+            fields: [
+              { name: 'XP Disponível', value: `${char.xp.unspent} / ${char.xp.total}`, inline: true },
+              { name: 'Habilidades', value: char.learnedAbilities.length > 0 ? char.learnedAbilities.map(a => `• ${a.name} (${a.level})`).join('\n') : 'Nenhuma aprendida.', inline: false }
+            ]
+          }
+        ];
+
+        const row1 = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId(`roll_precisao_${userId}`).setLabel('Accurate').setEmoji('⚔️').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`roll_astucia_${userId}`).setLabel('Cunning').setEmoji('🧠').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`roll_vigilancia_${userId}`).setLabel('Vigilant').setEmoji('🌿').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`roll_forca_${userId}`).setLabel('Strong').setEmoji('🛡️').setStyle(ButtonStyle.Secondary)
+        );
+
+        const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId(`roll_agilidade_${userId}`).setLabel('Quick').setEmoji('⚡').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`roll_resolucao_${userId}`).setLabel('Resolute').setEmoji('🕯️').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`roll_persuasao_${userId}`).setLabel('Persuasive').setEmoji('🎭').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`roll_discricao_${userId}`).setLabel('Discreet').setEmoji('👣').setStyle(ButtonStyle.Secondary)
+        );
 
         await interaction.reply({
-          embeds: [{
-            title: `Ficha de ${char.name}`,
-            color: 0x2b2d31,
-            description: `${raceText}${occupationText}${shadowText}${statusText}${moneyText}`,
-            fields: [
-              { name: '🛡️ Derivados', value: `**Resistência (Toughness):** ${toughness}\n**Limiar de Dor:** ${painThreshold}\n**Defesa:** ${defense} *(Agilidade ${char.attributes.agilidade} + Armadura ${char.armorMod})*\n**Limiar de Corrupção:** ${corruptionThreshold}`, inline: false },
-              { name: '🌑 Corrupção', value: `**Temporária:** ${char.corruption.temp} | **Permanente:** ${char.corruption.perm}\n**Total:** ${char.corruption.temp + char.corruption.perm} / ${corruptionThreshold}`, inline: false },
-              { name: '✨ Experiência', value: `**XP Disponível:** ${char.xp.unspent} / ${char.xp.total}`, inline: false },
-              { name: '📊 Atributos', value: `Precisão: ${char.attributes.precisao} | Astúcia: ${char.attributes.astucia}\nDiscrição: ${char.attributes.discricao} | Persuasão: ${char.attributes.persuasao}\nAgilidade: ${char.attributes.agilidade} | Resolução: ${char.attributes.resolucao}\nForça: ${char.attributes.forca} | Vigilância: ${char.attributes.vigilancia}`, inline: false },
-              { name: '⚔️ Habilidades', value: char.learnedAbilities.length > 0 ? char.learnedAbilities.map(a => `• ${a.name} (${a.level})`).join('\n') : 'Nenhuma habilidade aprendida.', inline: false }
-            ]
-          }]
+          embeds: embeds,
+          components: [row1, row2]
         });
+      } else if (subcommand === 'aprender') {
+        const char = characters.get(userId);
+        if (!char) {
+          await interaction.reply({ content: 'Você precisa de uma ficha primeiro!', ephemeral: true });
+          return;
+        }
+
+        const categoria = interaction.options.getString('categoria', true);
+        const nome = interaction.options.getString('nome', true);
+        const nivel = interaction.options.getString('nivel', true) as 'Novato' | 'Adepto' | 'Mestre';
+
+        const xpCosts = { 'Novato': 10, 'Adepto': 20, 'Mestre': 30 };
+        const cost = xpCosts[nivel];
+
+        if (char.xp.unspent < cost) {
+          await interaction.reply({ content: `Você não tem XP suficiente! (Necessário: ${cost}, Disponível: ${char.xp.unspent})`, ephemeral: true });
+          return;
+        }
+
+        // Find ability in the correct category
+        let ability;
+        if (categoria === 'Traço') ability = traits.find(t => t.id === nome || t.name === nome);
+        else if (categoria === 'Poder') ability = powers.find(p => p.id === nome || p.name === nome);
+        else if (categoria === 'Ritual') ability = powers.find(p => p.id === nome || p.name === nome); // Rituais are in powers
+        else ability = abilities.find(a => a.id === nome || a.name === nome);
+
+        if (!ability) {
+          await interaction.reply({ content: `${categoria} não encontrado(a).`, ephemeral: true });
+          return;
+        }
+
+        // Check if already learned
+        const existing = char.learnedAbilities.find(a => a.id === ability.id);
+        if (existing) {
+          if (existing.level === nivel) {
+            await interaction.reply({ content: `Você já possui ${ability.name} no nível ${nivel}.`, ephemeral: true });
+            return;
+          }
+          existing.level = nivel;
+        } else {
+          char.learnedAbilities.push({ id: ability.id, name: ability.name, level: nivel });
+        }
+
+        char.xp.unspent -= cost;
+        await interaction.reply({ content: `✨ **${char.name}** aprendeu/melhorou **${ability.name}** para **${nivel}**! (Gasto: ${cost} XP)` });
       }
+    } else if (interaction.commandName === 'golpear') {
+      const char = characters.get(userId);
+      if (!char) {
+        await interaction.reply({ content: 'Você precisa de uma ficha primeiro!', ephemeral: true });
+        return;
+      }
+      // Simplified attack: uses the equipped weapon or a default 1d8
+      const weapon = char.equipment?.weapon || { name: 'Punhos', damage: '1d4', qualities: ['Short'] };
+      const attrValue = char.attributes.precisao;
+      const roll = Math.floor(Math.random() * 20) + 1;
+      const success = roll <= attrValue;
+      const damage = success ? parseAndRoll(weapon.damage || '1d8').total : 0;
+
+      const embed = {
+        title: `⚔️ ${char.name} golpeia com ${weapon.name}`,
+        color: success ? 0x10b981 : 0xef4444,
+        description: `**Teste:** ${roll} (Alvo: ${attrValue})\n**Resultado:** ${success ? `✅ Sucesso! Dano: **${damage}**` : '❌ Falha'}`,
+        footer: { text: `Arma: ${weapon.name} | Dano: ${weapon.damage}` }
+      };
+      await interaction.reply({ embeds: [embed] });
+
+    } else if (interaction.commandName === 'poder') {
+      const char = characters.get(userId);
+      if (!char) {
+        await interaction.reply({ content: 'Você precisa de uma ficha primeiro!', ephemeral: true });
+        return;
+      }
+      const powerName = interaction.options.getString('nome', true);
+      const power = powers.find(p => p.id === powerName || p.name.toLowerCase() === powerName.toLowerCase());
+      
+      if (!power) {
+        await interaction.reply({ content: 'Poder não encontrado.', ephemeral: true });
+        return;
+      }
+
+      // Logic similar to 'conjurar'
+      const hasTradition = char.learnedAbilities.some(a => 
+        ['teurgia', 'bruxaria', 'ordo_magica', 'feiticaria', 'simbolismo', 'magia_de_cajado', 'canto_dos_trolls'].includes(a.id)
+      );
+      let corruptionRoll = hasTradition ? { total: 1 } : parseAndRoll('1d4');
+      char.corruption.temp += corruptionRoll.total;
+
+      const embed = {
+        title: `✨ ${char.name} usa ${power.name}`,
+        color: 0x8b5cf6,
+        description: `**Efeito:** ${power.test}\n**Corrupção:** +${corruptionRoll.total} Temp\n**Total:** ${char.corruption.temp + char.corruption.perm} / ${Math.ceil(char.attributes.resolucao / 2)} (Limiar)`,
+        fields: [{ name: 'Duração', value: power.duration, inline: true }]
+      };
+      await interaction.reply({ embeds: [embed] });
+
+    } else if (['avancar', 'retirar', 'erguer', 'visar', 'cegar', 'desengajar', 'flanquear', 'surpreender', 'vantagem'].includes(interaction.commandName)) {
+      const char = characters.get(userId);
+      const actionNames: Record<string, string> = {
+        avancar: 'Avançar', retirar: 'Retirar', erguer: 'Erguer-se', visar: 'Visar',
+        cegar: 'Cegar', desengajar: 'Desengajar', flanquear: 'Flanquear', surpreender: 'Surpreender', vantagem: 'Vantagem'
+      };
+      await interaction.reply({ content: `🎭 **${char?.name || userName}** realiza a ação: **${actionNames[interaction.commandName]}**.` });
+
+    } else if (interaction.commandName === 'capitulo') {
+      const char = characters.get(userId);
+      if (!char) {
+        await interaction.reply({ content: 'Você precisa de uma ficha primeiro!', ephemeral: true });
+        return;
+      }
+
+      if (!char.chapter) {
+        // Generate new Chapter
+        const primary = primaryBlocks[Math.floor(Math.random() * primaryBlocks.length)];
+        const history = [];
+        for (let i = 0; i < Math.floor(Math.random() * 2) + 1; i++) {
+          history.push(historyMarcos[Math.floor(Math.random() * historyMarcos.length)]);
+        }
+        const culture = cultures[Math.floor(Math.random() * cultures.length)];
+        
+        char.chapter = {
+          currentDay: 1,
+          theme: primary.theme,
+          conflict: primary.conflict,
+          description: primary.description,
+          tone: primary.tone,
+          history: history,
+          nature: { resources: "Rico", corruption: "1D4-1D6" },
+          culture: culture,
+          npcs: [],
+          journal: [`Dia 1: O Capítulo se inicia sob o tema ${primary.theme}.`]
+        };
+
+        const embed = {
+          title: `🌟 Novo Capítulo Iniciado: ${char.name}`,
+          color: 0xdaa520,
+          description: `**Tema:** ${char.chapter.theme}\n**Conflito Principal:** ${char.chapter.conflict}\n**Atmosfera:** ${char.chapter.tone}\n\n*${char.chapter.description}*\n\n**Cultura Dominante:** ${char.chapter.culture}\n**Marcos Históricos:** ${char.chapter.history.join(', ')}`,
+          footer: { text: `Dia 1 de 365` }
+        };
+        await interaction.reply({ embeds: [embed] });
+      } else {
+        // View current Chapter
+        const embed = {
+          title: `📖 Capítulo de ${char.name} (Dia ${char.chapter.currentDay}/365)`,
+          color: 0xdaa520,
+          description: `*${char.chapter.description}*`,
+          fields: [
+            { name: 'Tema', value: char.chapter.theme, inline: true },
+            { name: 'Conflito', value: char.chapter.conflict, inline: true },
+            { name: 'Atmosfera', value: char.chapter.tone, inline: true },
+            { name: 'Cultura', value: char.chapter.culture, inline: true },
+            { name: 'Diário Recente', value: char.chapter.journal.slice(-5).join('\n') || 'Nenhum.', inline: false }
+          ]
+        };
+
+        const location = locations.find(l => l.id === char.currentLocation);
+        const isCity = location?.id === 'yndaros' || location?.id === 'thistle_hold';
+
+        if (isCity) {
+          const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder().setCustomId(`social_challenge_${userId}`).setLabel('Desafio Social').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`domain_management_${userId}`).setLabel('Gestão de Domínio').setStyle(ButtonStyle.Secondary)
+          );
+          await interaction.reply({ embeds: [embed], components: [row] });
+        } else {
+          await interaction.reply({ embeds: [embed] });
+        }
+      }
+
+    } else if (interaction.commandName === 'oraculo') {
+      const roll = Math.floor(Math.random() * 20) + 1;
+      const answer = oracleTable.find(a => roll <= a.max) || oracleTable[oracleTable.length - 1];
+      
+      const embed = {
+        title: `🔮 O Oráculo Responde`,
+        color: 0x8b5cf6,
+        description: `**Pergunta:** ${interaction.options.getString('pergunta') || 'O destino reserva algo?'}\n**Resultado:** ${roll}\n**Resposta:** **${answer.text}**`,
+        footer: { text: roll >= 21 ? "A Corrupção do Mundo aumenta em 1." : "" }
+      };
+      await interaction.reply({ embeds: [embed] });
+
+    } else if (interaction.commandName === 'prompt') {
+      const p1 = creativePrompts.part1[Math.floor(Math.random() * 8)];
+      const p2 = creativePrompts.part2[Math.floor(Math.random() * 8)];
+      const p3 = creativePrompts.part3[Math.floor(Math.random() * 8)];
+      const shadow = creativePrompts.shadow[Math.floor(Math.random() * 8)];
+      
+      const embed = {
+        title: `🎭 Prompt Criativo`,
+        color: 0x10b981,
+        description: `**Ação:** ${p1} ${p2}\n**Foco:** ${p3}\n**Sombra Sugerida:** ${shadow}`,
+        footer: { text: "Use para inspirar a narração da cena." }
+      };
+      await interaction.reply({ embeds: [embed] });
+
+    } else if (interaction.commandName === 'bloquear') {
+      const char = characters.get(userId);
+      if (!char) return;
+      const defense = char.attributes.agilidade + char.armorMod;
+      const roll = Math.floor(Math.random() * 20) + 1;
+      const success = roll <= defense;
+
+      const embed = {
+        title: `🛡️ ${char.name} bloqueia!`,
+        color: success ? 0x3b82f6 : 0xf59e0b,
+        description: `**Teste:** ${roll} (Alvo: ${defense})\n**Resultado:** ${success ? '✅ Bloqueado!' : '❌ Atingido!'}`,
+      };
+      await interaction.reply({ embeds: [embed] });
+
+    } else if (interaction.commandName === 'contra') {
+      const char = characters.get(userId);
+      if (!char) return;
+      const roll = Math.floor(Math.random() * 20) + 1;
+      const success = roll <= char.attributes.precisao;
+      await interaction.reply({ content: `⚔️ **${char.name}** tenta um **Contra-Ataque**! (Teste: ${roll} vs ${char.attributes.precisao}) - ${success ? '✅ Sucesso!' : '❌ Falha'}` });
+
+    } else if (interaction.commandName === 'ferir') {
+      const char = characters.get(userId);
+      if (!char) return;
+      const valor = interaction.options.getInteger('valor', true);
+      // Simplified: just a message for now, or update toughness if we had a current value
+      await interaction.reply({ content: `💥 **${char.name}** sofreu **${valor}** de dano!` });
+
+    } else if (interaction.commandName === 'estado') {
+      const char = characters.get(userId);
+      if (!char) return;
+      const toughness = Math.max(char.attributes.forca, 10);
+      const corruptionThreshold = Math.ceil(char.attributes.resolucao / 2);
+      const embed = {
+        title: `🌡️ Estado de ${char.name}`,
+        color: 0x2b2d31,
+        fields: [
+          { name: 'Toughness', value: `${toughness}`, inline: true },
+          { name: 'Corrupção', value: `${char.corruption.temp + char.corruption.perm} / ${corruptionThreshold}`, inline: true },
+          { name: 'Sombra', value: char.shadow || 'Não definida', inline: false }
+        ]
+      };
+      await interaction.reply({ embeds: [embed] });
+
+    } else if (interaction.commandName === 'agonizar') {
+      await interaction.reply({ content: '💀 Você caiu! Entre em estado de morte e prepare-se para os testes de sorte.' });
+
+    } else if (interaction.commandName === 'sorte') {
+      const roll = Math.floor(Math.random() * 20) + 1;
+      let msg = '';
+      if (roll === 1) msg = '🌟 **Milagre!** Você se estabiliza com 1 de Toughness.';
+      else if (roll <= 10) msg = '❤️ Você está estável, mas inconsciente.';
+      else if (roll <= 19) msg = '🩸 Sua condição piora...';
+      else msg = '💀 **Morte.** Sua jornada termina aqui.';
+      await interaction.reply({ content: `🎲 **Teste de Sorte:** ${roll}\n${msg}` });
+
+    } else if (interaction.commandName === 'curar') {
+      const valor = interaction.options.getInteger('valor', true);
+      await interaction.reply({ content: `❤️‍🩹 **Cura aplicada:** +${valor} de Toughness.` });
+
+    } else if (interaction.commandName === 'elixir') {
+      await interaction.reply({ content: '🧪 Você usa um elixir e sente suas forças retornarem.' });
+
+    } else if (interaction.commandName === 'iniciar') {
+      const char = characters.get(userId);
+      const initiative = char ? char.attributes.agilidade : 10;
+      await interaction.reply({ content: `🧭 **Combate Iniciado!** Sua iniciativa é **${initiative}**.` });
+
+    } else if (interaction.commandName === 'rodada') {
+      await interaction.reply({ content: '⏳ Próxima rodada! O tempo urge em Davokar.' });
+
+    } else if (interaction.commandName === 'agir') {
+      const char = characters.get(userId);
+      if (!char) return;
+      const attrKey = interaction.options.getString('atributo', true) as keyof Character['attributes'];
+      const attrValue = char.attributes[attrKey];
+      const roll = Math.floor(Math.random() * 20) + 1;
+      const success = roll <= attrValue;
+      await interaction.reply({ content: `🎲 **Teste de ${attrKey}:** ${roll} vs ${attrValue} - ${success ? '✅ Sucesso!' : '❌ Falha'}` });
+
+    } else if (interaction.commandName === 'dialogar') {
+      const char = characters.get(userId);
+      const attr = char?.attributes.persuasao || 10;
+      const roll = Math.floor(Math.random() * 20) + 1;
+      const success = roll <= attr;
+      await interaction.reply({ content: `🎭 **Cena Social:** ${success ? '✅ Você convence seu interlocutor.' : '❌ Suas palavras caem em ouvidos moucos.'} (Teste: ${roll} vs ${attr})` });
+
+    } else if (interaction.commandName === 'xp') {
+      const char = characters.get(userId);
+      if (!char) return;
+      await interaction.reply({ content: `⭐ **Experiência de ${char.name}:** ${char.xp.unspent} disponíveis / ${char.xp.total} totais.` });
+
+    } else if (interaction.commandName === 'treinar') {
+      const char = characters.get(userId);
+      if (!char) return;
+      const abilityName = interaction.options.getString('nome', true);
+      await interaction.reply({ content: `📖 **${char.name}** está treinando a habilidade: **${abilityName}**. (Use \`/habilidade aprender\` para confirmar o gasto de XP)` });
+
+    } else if (interaction.commandName === 'viajar') {
+      const char = characters.get(userId);
+      if (!char) {
+        await interaction.reply({ content: 'Você precisa de uma ficha primeiro!', ephemeral: true });
+        return;
+      }
+
+      const currentLocation = locations.find(l => l.id === char.currentLocation) || locations[0];
+      const availableDestinations = locations.filter(l => currentLocation.destinations.some(d => d.id === l.id));
+
+      if (availableDestinations.length === 0) {
+        await interaction.reply({ content: 'Não há destinos conhecidos a partir daqui.', ephemeral: true });
+        return;
+      }
+
+      const travelSelect = new StringSelectMenuBuilder()
+        .setCustomId('select_travel')
+        .setPlaceholder('Escolha seu destino')
+        .addOptions(availableDestinations.map(d => {
+          const destInfo = currentLocation.destinations.find(dest => dest.id === d.id);
+          return {
+            label: d.name,
+            description: `${d.type} - ${destInfo?.distance}km`,
+            value: d.id
+          };
+        }));
+
+      const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(travelSelect);
+
+      await interaction.reply({
+        content: `📍 Você está em **${currentLocation.name}** (${currentLocation.terrain}).\nPara onde deseja viajar?`,
+        components: [row]
+      });
+
+    } else if (interaction.commandName === 'explorar') {
+      const char = characters.get(userId);
+      if (!char) {
+        await interaction.reply({ content: 'Você precisa de uma ficha primeiro!', ephemeral: true });
+        return;
+      }
+
+      const currentLocation = locations.find(l => l.id === char.currentLocation) || locations[0];
+
+      if (currentLocation.options.length === 0) {
+        await interaction.reply({ content: 'Não há nada de especial para explorar aqui no momento.', ephemeral: true });
+        return;
+      }
+
+      const exploreSelect = new StringSelectMenuBuilder()
+        .setCustomId('select_explore')
+        .setPlaceholder('O que deseja fazer?')
+        .addOptions(currentLocation.options.map(o => ({
+          label: o,
+          value: o
+        })));
+
+      const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(exploreSelect);
+
+      await interaction.reply({
+        content: `🔍 Explorando **${currentLocation.name}**...\n${currentLocation.description}\n\nO que deseja fazer?`,
+        components: [row]
+      });
+
     } else if (interaction.commandName === 'teste') {
       const char = characters.get(userId);
       if (!char) {
